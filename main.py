@@ -64,37 +64,41 @@ def get_team_pass_count(tracks):
 
 
 def assign_teams(video_frames, tracks):
-    """Assign each player to a team and store team + color info."""
     team_assigner = TeamAssigner()
-    team_assigner.assign_team_color(video_frames[0], tracks['players'][0])
+
+    # find first frame with enough players
+    for f_idx, player_track in enumerate(tracks['players']):
+        if len(player_track) >= 2:
+            team_assigner.assign_team_color(video_frames[f_idx], player_track)
+            break
 
     for frame_num, player_track in enumerate(tracks['players']):
         for player_id, track in player_track.items():
-            team = team_assigner.get_player_team(
-                video_frames[frame_num], track['bbox'], player_id
-            )
-            tracks['players'][frame_num][player_id]['team'] = team 
-            tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
+            team = team_assigner.get_player_team(video_frames[frame_num], track['bbox'], player_id)
+            tracks['players'][frame_num][player_id]['team'] = team
+            if team in team_assigner.team_colors:
+                tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
 
     return tracks
 
 
 def assign_ball_possession(tracks):
-    """Mark which player has the ball per frame and build team ball control array."""
     player_assigner = PlayerBallAssigner()
     team_ball_control = []
+    last_team = -1
 
-    for frame_num, player_track in enumerate(tracks['players']):
-        ball_bbox = tracks['ball'][frame_num][1]['bbox']
-        assigned_player = player_assigner.assign_ball(player_track, ball_bbox)
+    for frame_num, player_track in enumerate(tracks["players"]):
+        ball_bbox = tracks["ball"][frame_num].get(1, {}).get("bbox", None)
+        assigned_player = player_assigner.assign_ball(player_track, ball_bbox) if ball_bbox else -1
 
         if assigned_player != -1:
-            tracks['players'][frame_num][assigned_player]['has_ball'] = True
-            team_ball_control.append(tracks['players'][frame_num][assigned_player]['team'])
+            team = tracks["players"][frame_num][assigned_player].get("team", -1)
+            tracks["players"][frame_num][assigned_player]["has_ball"] = True
+            team_ball_control.append(team)
+            last_team = team
         else:
-            # If no player detected, keep last possession
-            team_ball_control.append(team_ball_control[-1] if team_ball_control else -1)
-            
+            team_ball_control.append(last_team)
+
     return np.array(team_ball_control)
 
 
@@ -102,7 +106,7 @@ def estimate_camera_movement(video_frames, tracks):
     """Estimate and adjust for camera movement across frames."""
     estimator = CameraMovementEstimator(video_frames[0])
     camera_movement_per_frame = estimator.get_camera_movement(
-        video_frames, read_from_stub=True, stub_path='stubs/camera_movement_stub.pkl'
+        video_frames, read_from_stub=True, stub_path='stubs_video_1/camera_movement_stub.pkl'
     )
     estimator.add_adjusted_positions(tracks, camera_movement_per_frame)
     return camera_movement_per_frame, tracks, estimator
@@ -129,7 +133,7 @@ def main():
     # --- 2. Tracking ---
     tracker = Tracker('models/best.pt')
     tracks = tracker.get_object_tracks(
-        video_frames, read_from_stub=True, stub_path='stubs/track_stubs.pkl'
+        video_frames, read_from_stub=True, stub_path='stubs_video_1/track_stubs.pkl'
     )
     tracker.add_position_to_tracks(tracks)
 
@@ -160,17 +164,17 @@ def main():
     speed_distance_estimator.draw_speed_and_distance(output_video_frames, tracks)
 
     # --- 11. Heatmaps ---
-    ## 1) player heatmap for player id 6
-    # H6 = compute_player_heatmap(tracks, player_id=51)
-    # plot_heatmap_on_pitch(H6, title="Player 51 heatmap (m)")
-    # H114 = compute_player_heatmap(tracks, player_id=114)
-    # plot_heatmap_on_pitch(H114, title="Player 144 heatmap (m)")
+    # 1) player heatmap for player id 6
+    H6 = compute_player_heatmap(tracks, player_id=51)
+    plot_heatmap_on_pitch(H6, title="Player 51 heatmap (m)", savepath='heatmap_images/heatmap_player_51.png')
+    H114 = compute_player_heatmap(tracks, player_id=114)
+    plot_heatmap_on_pitch(H114, title="Player 144 heatmap (m)", savepath='heatmap_images/heatmap_player_144.png')
 
-    # ## 2) team heatmap
-    # H_team2 = compute_team_heatmap(tracks, team_id=2)
-    # plot_heatmap_on_pitch(H_team2, cmap="Reds", title="Team 2 heatmap (m)")
-    # H_team1 = compute_team_heatmap(tracks, team_id=1)
-    # plot_heatmap_on_pitch(H_team1, cmap="Reds", title="Team 1 heatmap (m)")
+    ## 2) team heatmap
+    H_team1 = compute_team_heatmap(tracks, team_id=1)
+    plot_heatmap_on_pitch(H_team1, cmap="Reds", title="Team 1 heatmap (m)", savepath='heatmap_images/team_1.png')
+    H_team2 = compute_team_heatmap(tracks, team_id=2)
+    plot_heatmap_on_pitch(H_team2, cmap="Reds", title="Team 2 heatmap (m)", savepath='heatmap_images/team_2.png')
 
     
     # --- 12. Save video ---

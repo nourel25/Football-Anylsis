@@ -1,132 +1,124 @@
 import pickle
 import cv2
 import numpy as np
-from utils.bbox_utils import measure_distance, measure_xy_distance
 import os
 
-'''
-
-If we track players without correcting for camera movement, 
-it looks like players move more than they really do.
-
-To fix this → detect stable points (field edges, lines, ads)
-→ track how they move frame to frame → that is camera motion.
-
-Then subtract that motion from players/ball 
-so their movement is relative to the pitch, not the camera.
-
-'''
-
-
-class CameraMovementEstimator():
+class CameraMovementEstimator:
     def __init__(self, frame):
         self.minimum_distance = 5
 
         first_frame_grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = first_frame_grayscale.shape
+
         mask_features = np.zeros_like(first_frame_grayscale)
-        mask_features[:, 0:20] = 1
-        mask_features[:, 900:1050] = 1
+
+        left_w = int(0.05 * w)
+        right_w = int(0.05 * w)
+        mask_features[:, :left_w] = 1
+        mask_features[:, w - right_w:] = 1
+
+        top_h = int(0.05 * h)
+        bottom_h = int(0.05 * h)
+        mask_features[:top_h, :] = 1
+        mask_features[h - bottom_h:, :] = 1
 
         self.features = dict(
-            maxCorners = 100,     # detect up to 100 corners (features)
-            qualityLevel = 0.3,   # discarding teh weakest 30%
-            minDistance = 3,      # min distance between detected corners
-            blockSize = 7,        # neighborhood size to check for corner quality
-            mask = mask_features  # only look in certain areas of the frame
+            maxCorners=200,
+            qualityLevel=0.3,
+            minDistance=5,
+            blockSize=7,
+            mask=mask_features,
         )
 
         self.lk_params = dict(
-            winSize = (15, 15),
-            maxLevel = 2, 
-            criteria = (
-                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 
-                10, 0.03
-            )
+            winSize=(15, 15),
+            maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
         )
 
     def get_camera_movement(self, frames, read_from_stub=False, stub_path=None):
-
-        # read the stub 
-        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
-            with open(stub_path,'rb') as f:
-                return pickle.load(f)
-            
+        if read_from_stub and stub_path and os.path.exists(stub_path):
+            try:
+                with open(stub_path, "rb") as f:
+                    return pickle.load(f)
+            except Exception:
+                print("⚠️ Stub corrupted, recomputing camera movement")
 
         camera_movement = [[0, 0]] * len(frames)
-
-        # detects strong corner points in first frame
         old_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
         old_features = cv2.goodFeaturesToTrack(old_gray, **self.features)
 
         for frame_num in range(1, len(frames)):
             frame_gray = cv2.cvtColor(frames[frame_num], cv2.COLOR_BGR2GRAY)
 
-            # tracking the detectd corners (features)
-            # calcOpticalFlowPyrLK plays “spot the difference” in the next frame to see where those dots moved
-            new_features, _, _ = cv2.calcOpticalFlowPyrLK(
-                old_gray,           # prev frame
-                frame_gray,         # current frame
-                old_features,       # points we want to track       
-                None,
-                **self.lk_params 
+            if old_features is None or len(old_features) < 10:
+                old_features = cv2.goodFeaturesToTrack(old_gray, **self.features)
+
+            if old_features is None:
+                continue
+
+            new_features, status, _ = cv2.calcOpticalFlowPyrLK(
+                old_gray, frame_gray, old_features, None, **self.lk_params
             )
 
-            # compare the old vs new
-            max_distance = 0
-            camera_movement_x, camera_movement_y = 0, 0
+            if new_features is None or status is None:
+                continue
 
-            # loop through tracked features
-            for i, (new, old) in enumerate(zip(new_features, old_features)):
-                new_features_point = new.ravel()
-                old_features_point = old.ravel()
+            valid_old = old_features[status.flatten() == 1].reshape(-1, 2)
+            valid_new = new_features[status.flatten() == 1].reshape(-1, 2)
 
-                distance = measure_distance(new_features_point, old_features_point)
-                if distance > max_distance:
-                    max_distance = distance
-                    # store that as the estimated camera movement
-                    camera_movement_x, camera_movement_y = measure_xy_distance(old_features_point, new_features_point)
+            if valid_old.shape[0] == 0 or valid_new.shape[0] == 0:
+                continue
 
-            if max_distance > self.minimum_distance:
-                camera_movement[frame_num] = [camera_movement_x,camera_movement_y]
-                old_features = cv2.goodFeaturesToTrack(frame_gray, **self.features)
+            dx = valid_new[:, 0] - valid_old[:, 0]
+            dy = valid_new[:, 1] - valid_old[:, 1]
+
+            median_dx = float(np.median(dx))
+            median_dy = float(np.median(dy))
+
+            if (
+                abs(median_dx) > self.minimum_distance
+                or abs(median_dy) > self.minimum_distance
+            ):
+                camera_movement[frame_num] = [median_dx, median_dy]
+            else:
+                camera_movement[frame_num] = camera_movement[frame_num - 1]
 
             old_gray = frame_gray.copy()
+            old_features = valid_new.reshape(-1, 1, 2)
 
-        if stub_path is not None:
-            with open(stub_path,'wb') as f:
-                pickle.dump(camera_movement,f)
-        
+        if stub_path:
+            with open(stub_path, "wb") as f:
+                pickle.dump(camera_movement, f)
+
         return camera_movement
-        
-    def draw_camera_movement(self,frames, camera_movement_per_frame):
-        output_frames=[]
 
+    def draw_camera_movement(self, frames, camera_movement_per_frame):
+        output_frames = []
         for frame_num, frame in enumerate(frames):
-            frame= frame.copy()
-
+            frame = frame.copy()
             overlay = frame.copy()
-            cv2.rectangle(overlay,(0,0),(500,100),(255,255,255),-1)
-            alpha =0.6
-            cv2.addWeighted(overlay,alpha,frame,1-alpha,0,frame)
+            cv2.rectangle(overlay, (0, 0), (500, 100), (255, 255, 255), -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
             x_movement, y_movement = camera_movement_per_frame[frame_num]
-            frame = cv2.putText(frame,f"Camera Movement X: {x_movement:.2f}",(10,30), cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,0),3)
-            frame = cv2.putText(frame,f"Camera Movement Y: {y_movement:.2f}",(10,60), cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,0),3)
-
-            output_frames.append(frame) 
-
+            cv2.putText(frame, f"Camera X: {x_movement:.2f}",
+                        (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 3)
+            cv2.putText(frame, f"Camera Y: {y_movement:.2f}",
+                        (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 3)
+            output_frames.append(frame)
         return output_frames
-    
+
     def add_adjusted_positions(self, tracks, camera_movement_per_frame):
-        for object, object_tracks in tracks.items():
+        for object_name, object_tracks in tracks.items():
             for frame_num, frame_tracks in enumerate(object_tracks):
                 for track_id, track in frame_tracks.items():
                     if frame_num == 0:
-                        adjusted_position = track['position']
+                        adjusted_position = track["position"]
                     else:
-                        x_movement, y_movement = camera_movement_per_frame[frame_num]
+                        dx, dy = camera_movement_per_frame[frame_num]
                         adjusted_position = (
-                            track['position'][0] - x_movement,
-                            track['position'][1] - y_movement
+                            track["position"][0] - dx,
+                            track["position"][1] - dy,
                         )
-                    tracks[object][frame_num][track_id]['adjusted_position'] = adjusted_position
+                    tracks[object_name][frame_num][track_id]["adjusted_position"] = adjusted_position
