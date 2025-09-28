@@ -1,0 +1,9 @@
+input_videos/
+output_videos/
+runs/
+models/
+__pycache__/
+*.pkl
+*.pickle
+*.log
+*.pt
