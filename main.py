@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 from utils import read_video, save_video
 from trackers import Tracker
@@ -179,7 +180,7 @@ def main():
     
     # --- 12. Save video ---
     save_video(output_video_frames, 'output_videos/output_video.avi', fps=fps)
-
+    cv2.imwrite("output_images/output_frame_2.jpg", output_video_frames[200])
 
 if __name__ == '__main__':
     main()
